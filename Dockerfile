@@ -14,6 +14,9 @@ ENV LIBPOSTAL_REST_RELEASE ${LIBPOSTAL_REST_RELEASE:-1.1.0}
 
 ENV DEBIAN_FRONTEND noninteractive
 
+ARG CONFIGURE_FLAGS
+ENV CONFIGURE_FLAGS ${CONFIGURE_FLAGS:--disable-sse2}
+
 RUN set -eux; \
     apt-get update;  \
     apt-get install -y --no-install-recommends \
@@ -39,7 +42,7 @@ RUN set -eux; \
     cd /usr/src/libpostal; \
     ./bootstrap.sh; \
     mkdir --parents /opt/libpostal_data; \
-    ./configure --datadir=/opt/data --prefix=/libpostal; \
+    ./configure --datadir=/opt/data --prefix=/libpostal ${CONFIGURE_FLAGS}; \
     make --jobs=$(nproc); \
     make install DESTDIR=/libpostal; \
     ldconfig -v
