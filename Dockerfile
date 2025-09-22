@@ -1,85 +1,111 @@
-FROM golang:1.17.8-buster AS builder
+# syntax=docker/dockerfile:1
+FROM debian:bookworm AS builder
+ARG LIBPOSTAL_UPSTREAM=github.com/openvenues/libpostal
+ENV LIBPOSTAL_UPSTREAM=${LIBPOSTAL_UPSTREAM}
+ARG LIBPOSTAL_COMMIT=master
+ENV LIBPOSTAL_COMMIT=${LIBPOSTAL_COMMIT}
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PKG_CONFIG_PATH=/libpostal
 
-ARG LIBPOSTAL_UPSTREAM
-ENV LIBPOSTAL_UPSTREAM ${LIBPOSTAL_UPSTREAM:-github.com/openvenues/libpostal}
-
-ARG LIBPOSTAL_REST_UPSTREAM
-ENV LIBPOSTAL_REST_UPSTREAM ${LIBPOSTAL_REST_UPSTREAM:-github.com/johnlonganecker/libpostal-rest}
-
-ARG LIBPOSTAL_COMMIT
-ENV LIBPOSTAL_COMMIT ${LIBPOSTAL_COMMIT:-master}
-
-ARG LIBPOSTAL_REST_RELEASE
-ENV LIBPOSTAL_REST_RELEASE ${LIBPOSTAL_REST_RELEASE:-1.1.0}
-
-ENV DEBIAN_FRONTEND noninteractive
-
-RUN set -eux; \
-    apt-get update;  \
-    apt-get install -y --no-install-recommends \
-        build-essential \
-        libsnappy-dev \
-        pkg-config \
-        autoconf \
-        automake \
-        libtool \
-        curl \
-        git \
-    ; \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked <<EOF
+    set -eux
+    apt-get update
+    apt-get install \
+        --yes \
+        --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      libsnappy-dev \
+      pkg-config \
+      autoconf \
+      automake \
+      libtool \
+      curl \
+      git \
+    ;
     rm -rf /var/lib/apt/lists/*
-
-RUN set -eux; \
     git clone \
         "https://${LIBPOSTAL_UPSTREAM}" \
         --branch "${LIBPOSTAL_COMMIT}" \
         --depth=1 \
         --single-branch \
-        /usr/src/libpostal \
-    ; \
-    cd /usr/src/libpostal; \
-    ./bootstrap.sh; \
-    mkdir --parents /opt/libpostal_data; \
-    ./configure --datadir=/opt/data --prefix=/libpostal; \
-    make --jobs=$(nproc); \
-    make install DESTDIR=/libpostal; \
+      /usr/src/libpostal
+
+    cd /usr/src/libpostal
+    ./bootstrap.sh
+    mkdir --parents /opt/data
+    ./configure --datadir=/opt/data --prefix=/libpostal
+    make --jobs=$(nproc)
+    make install DESTDIR=/libpostal
+EOF
+
+RUN <<EOF
+    set -eux
+    mv /libpostal/libpostal/* /libpostal/
+    rm -rf /libpostal/libpostal
+    mkdir /libpostal/bin/.libs
+    cd /usr/src/libpostal
+    cp libpostal.pc /libpostal/
+    cp src/.libs/libpostal src/.libs/address_parser /libpostal/bin/
+    chmod a+x /libpostal/bin/*
+    cd /libpostal
     ldconfig -v
+    pkg-config --cflags libpostal
+EOF
 
-RUN set -eux; \
-    mv /libpostal /_libpostal; \
-    mv /_libpostal/libpostal /libpostal; \
-    cd /libpostal; \
-    export GOPATH=/usr/src/libpostal/workspace; \
-    export PKG_CONFIG_PATH=/usr/src/libpostal; \
-    pkg-config --cflags libpostal; \
-    go install "${LIBPOSTAL_REST_UPSTREAM}@v${LIBPOSTAL_REST_RELEASE}"; \
-    mv /usr/src/libpostal/workspace /libpostal/workspace; \
-    chmod a+x /libpostal/bin/* /libpostal/workspace/bin/*; \
-    rm -rf /usr/src/libpostal
+FROM debian:bookworm-slim AS library
+COPY --link --from=builder /libpostal/bin/* /usr/bin/
+COPY --link --from=builder /libpostal/lib/* /usr/lib/
+COPY --link --from=builder /libpostal/include/* /usr/lib/
+COPY --link --from=builder /opt/data /opt/data
+COPY --link --chmod=0555 <<EOF /entrypoint.sh
+#!/usr/bin/env bash
+exec "\${@}"
+EOF
 
-FROM busybox:glibc
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["libpostal", "--help"]
+
+FROM golang:1.25-bookworm  AS api_builder
+ARG LIBPOSTAL_REST_UPSTREAM=github.com/johnlonganecker/libpostal-rest
+ENV LIBPOSTAL_REST_UPSTREAM=${LIBPOSTAL_REST_UPSTREAM}
+ARG LIBPOSTAL_REST_VERSION=1.1.0
+ENV LIBPOSTAL_REST_VERSION=${LIBPOSTAL_REST_VERSION}
+ENV GOPATH=/go
+
 WORKDIR /libpostal
 
-ARG LOG_LEVEL
-ENV LOG_LEVEL "${LOG_LEVEL:-info}"
+COPY --link --from=builder /libpostal /libpostal
 
-ARG LOG_STRUCTURED
-ENV LOG_STRUCTURED "${LOG_STRUCTURED:-true}"
+RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod \
+    --mount=type=cache,id=go-build,target=/root/.cache/go-build <<EOF
+    set -eux
+    go install "${LIBPOSTAL_REST_UPSTREAM}@v${LIBPOSTAL_REST_VERSION}"
+    mv /go/bin/* /libpostal/bin/
+    chmod a+x /libpostal/bin/*
+EOF
 
-ARG PROMETHEUS_ENABLED
-ENV PROMETHEUS_ENABLED "${PROMETHEUS_ENABLED:-true}"
+FROM busybox:glibc AS api
+ARG LOG_LEVEL=info
+ENV LOG_LEVEL=${LOG_LEVEL}
+ARG LOG_STRUCTURED=true
+ENV LOG_STRUCTURED=${LOG_STRUCTURED}
+ARG PROMETHEUS_ENABLED=true
+ENV PROMETHEUS_ENABLED=${PROMETHEUS_ENABLED}
+ARG PROMETHEUS_PORT=9090
+ENV PROMETHEUS_PORT=${PROMETHEUS_PORT}
+ARG LISTEN_PORT=8080
+ENV LISTEN_PORT=${LISTEN_PORT}
 
-ARG PROMETHEUS_PORT
-ENV PROMETHEUS_PORT "${PROMETHEUS_PORT:-9090}"
+WORKDIR /libpostal
 
-ARG LISTEN_PORT
-ENV LISTEN_PORT "${LISTEN_PORT:-8080}"
+COPY --link --from=api_builder /libpostal/bin/* /usr/bin/
+COPY --link --from=builder /libpostal/bin/* /usr/bin/
+COPY --link --from=builder /libpostal/lib/* /usr/lib/
+COPY --link --from=builder /libpostal/include/* /usr/include/
+COPY --link --from=builder /opt/data /opt/data
 
-COPY --from=builder /libpostal/bin/* /usr/bin/
-COPY --from=builder /libpostal/workspace/bin/* /usr/bin/
-COPY --from=builder /libpostal/lib/* /usr/lib/
-COPY --from=builder /libpostal/include/* /usr/lib/
-COPY --from=builder /opt/data /opt/data
-
-EXPOSE 8080/tcp
-EXPOSE 8090/tcp
+EXPOSE ${LISTEN_PORT}/tcp
+EXPOSE ${PROMETHEUS_PORT}/tcp
 CMD ["/usr/bin/libpostal-rest"]

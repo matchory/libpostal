@@ -1,46 +1,84 @@
-name: Publish on Docker Hub
+name: Build Docker images
 
-# Controls when the workflow will run
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+
 on:
-  # Triggers the workflow on push or pull request events but only for the master branch
   push:
-    branches: [ master ]
-  pull_request:
-    branches: [ master ]
+    branches:
+      - main
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
   build:
-    # The type of runner that the job will run on
+    name: Build Docker images
     runs-on: ubuntu-latest
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v2
+    strategy:
+      fail-fast: false
+      matrix:
+        stage:
+          - library
+          - api
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up QEMU (for ARM builds)
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v1
+        uses: docker/setup-buildx-action@v3
 
-      - name: Login to DockerHub
-        uses: docker/login-action@v1 
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker images
-        # You may pin to the exact commit or the version.
-        # uses: docker/build-push-action@1bc1040caef9e604eb543693ba89b5bf4fc80935
-        uses: docker/build-push-action@v2.6.1
+      - name: Set up Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
         with:
-          # Push is a shorthand for --output=type=registry
-          push: true # optional, default is false
-          # List of tags
-          tags: radiergummi/matchory-libpostal:latest,radiergummi/matchory-libpostal:${{ github.sha }}
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,prefix=${{ matrix.stage }}-
+            type=raw,value=${{ matrix.stage }}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.vendor="Matchory GmbH"
+      - name: Build and Push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: ${{ matrix.stage }}
+          platforms: linux/amd64,linux/arm64
+          secret-envs: |
+            composer=COMPOSER_AUTH
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
