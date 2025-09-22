@@ -19,14 +19,6 @@ jobs:
   build:
     name: Build Docker images
     runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        stage:
-          - library
-          - api
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -51,24 +43,21 @@ jobs:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
         with:
           images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=sha,prefix=${{ matrix.stage }}-
-            type=raw,value=${{ matrix.stage }}
-            type=raw,value=latest,enable={{is_default_branch}}
           labels: |
             org.opencontainers.image.vendor="Matchory GmbH"
+
       - name: Build and Push
-        id: build
+        id: build_library
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          target: ${{ matrix.stage }}
+          target: library
           platforms: linux/amd64,linux/arm64
-          secret-envs: |
-            composer=COMPOSER_AUTH
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            ghcr.io/${{ github.repository }}:library
+            ghcr.io/${{ github.repository }}:library-${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha
@@ -80,5 +69,31 @@ jobs:
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.build_library.outputs.digest }}
+          push-to-registry: true
+
+      - name: Build and Push
+        id: build_api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: api
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ github.repository }}:api
+            ghcr.io/${{ github.repository }}:api-${{ github.sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build_api.outputs.digest }}
           push-to-registry: true
